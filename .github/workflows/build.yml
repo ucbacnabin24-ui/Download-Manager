@@ -1,0 +1,59 @@
+name: Build NovaDM
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unpack project
+        shell: pwsh
+        run: Expand-Archive -Path (Get-ChildItem *.zip | Select-Object -First 1).FullName -DestinationPath src
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          cd src
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Build NovaDM.exe
+        shell: pwsh
+        run: |
+          cd src
+          pyinstaller --noconfirm --onefile --windowed --name NovaDM --icon app.ico --add-data "novadm/ui;novadm/ui" --add-data "extension;extension" --collect-all yt_dlp --hidden-import pystray._win32 main.py
+      - name: Smoke test (start the exe, check the UI files are inside)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          cd src
+          $env:NOVADM_HOME = "$PWD\smoke_home"
+          Start-Process -FilePath "dist\NovaDM.exe" -ArgumentList "--no-window","--port","9701"
+          Start-Sleep -Seconds 12
+          $r = Invoke-RestMethod -Uri "http://127.0.0.1:9701/ping" -Headers @{"X-NovaDM"="1"}
+          if ($r.app -ne "NovaDM") { throw "ping failed" }
+          $css = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:9701/static/app.css"
+          if ($css.StatusCode -ne 200) { throw "UI files missing" }
+          Write-Host "Smoke test OK: NovaDM $($r.version) is running and serves its UI"
+          Stop-Process -Name NovaDM -Force
+      - name: Show app log if something went wrong
+        if: failure()
+        shell: pwsh
+        run: Get-Content "$env:APPDATA\NovaDM\novadm.log" -ErrorAction SilentlyContinue
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          cd src
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NovaDM-portable-exe
+          path: src/dist/NovaDM.exe
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: NovaDM-installer
+          path: src/installer_out/NovaDM-Setup.exe
+          if-no-files-found: ignore
